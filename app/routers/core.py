@@ -204,9 +204,9 @@ def modify_core_config(
 
     startup_config = xray.config.include_db_users()
     xray.core.restart(startup_config)
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected:
-            xray.operations.restart_node(node_id, startup_config)
+    # for node_id, node in list(xray.nodes.items()):
+    #     if node.connected:
+    #         xray.operations.restart_node(node_id, startup_config)
 
     xray.hosts.update()
 
