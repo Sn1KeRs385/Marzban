@@ -120,7 +120,8 @@ def process_inbounds_associations(db: Session, payload: dict):
     # Process users in batches of 100
     batch_size = 100
     offset = 0
-    queries = []
+    delete_queries = []
+    replace_queries = []
     
     while True:
         users = (
@@ -143,31 +144,43 @@ def process_inbounds_associations(db: Session, payload: dict):
             for inbound_tag in all_inbounds:
                 if user.username in inbound_tag:
                     # Delete association if username is in inbound tag
-                    queries.append(
+                    delete_queries.append(
                         f"DELETE FROM exclude_inbounds_association WHERE proxy_id = {proxy_id} AND inbound_tag = '{inbound_tag}'"
                     )
                 else:
                     # Add association if username is not in inbound tag
-                    queries.append(
-                        f"REPLACE INTO exclude_inbounds_association VALUES ({proxy_id}, '{inbound_tag}')"
+                    replace_queries.append(
+                        (proxy_id, inbound_tag)
                     )
         
         # Execute queries in batches of 100
-        if len(queries) >= 100:
-            db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-            db.execute(text("; ".join(queries)))
-            db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-            db.commit()
-            queries = []
+        if len(delete_queries) + len(replace_queries) >= 100:
+            execute_queries(db, delete_queries, replace_queries)
+            delete_queries = []
+            replace_queries = []
             
         offset += batch_size
     
     # Execute remaining queries
-    if queries:
-        db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-        db.execute(text("; ".join(queries)))
-        db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-        db.commit()
+    if delete_queries or replace_queries:
+        execute_queries(db, delete_queries, replace_queries)
+
+
+def execute_queries(db, delete_queries, replace_queries):
+    """Execute batch of queries with foreign key checks disabled."""
+    db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    
+    # Execute delete queries if any
+    if delete_queries:
+        db.execute(text("; ".join(delete_queries)))
+    
+    # Execute replace queries in a single batch
+    if replace_queries:
+        values = ", ".join([f"({proxy_id}, '{inbound_tag}')" for proxy_id, inbound_tag in replace_queries])
+        db.execute(text(f"REPLACE INTO exclude_inbounds_association VALUES {values}"))
+    
+    db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+    db.commit()
 
 
 @router.put("/core/config", responses={403: responses._403})
