@@ -13,6 +13,9 @@ from app.models.core import CoreStats
 from app.utils import responses
 from app.xray import XRayConfig
 from config import XRAY_JSON
+from sqlalchemy import text
+from app.db.models import ProxyInbound, User, Proxy, ProxyTypes
+from sqlalchemy.orm import joinedload
 
 router = APIRouter(tags=["Core"], prefix="/api", responses={401: responses._401})
 
@@ -107,11 +110,75 @@ def get_core_config(admin: Admin = Depends(Admin.check_sudo_admin)) -> dict:
     return config
 
 
+def process_inbounds_associations(db: Session, payload: dict):
+    """Process inbound associations for all users based on new configuration."""
+    # Get all unique inbound tags from database and payload
+    db_inbounds = {inbound.tag for inbound in db.query(ProxyInbound).all()}
+    payload_inbounds = {inbound["tag"] for inbound in payload.get("inbounds", [])}
+    all_inbounds = db_inbounds.union(payload_inbounds)
+    
+    # Process users in batches of 100
+    batch_size = 100
+    offset = 0
+    queries = []
+    
+    while True:
+        users = (
+            db.query(User)
+            .options(joinedload(User.proxies))
+            .filter(User.proxies.any(Proxy.type == ProxyTypes.VLESS))
+            .offset(offset)
+            .limit(batch_size)
+            .all()
+        )
+        
+        if not users:
+            break
+            
+        for user in users:
+            if not user.proxies:
+                continue
+                
+            proxy_id = user.proxies[0].id
+            for inbound_tag in all_inbounds:
+                if user.username in inbound_tag:
+                    # Delete association if username is in inbound tag
+                    queries.append(
+                        f"DELETE FROM exclude_inbounds_association WHERE proxy_id = {proxy_id} AND inbound_tag = '{inbound_tag}'"
+                    )
+                else:
+                    # Add association if username is not in inbound tag
+                    queries.append(
+                        f"REPLACE INTO exclude_inbounds_association VALUES ({proxy_id}, '{inbound_tag}')"
+                    )
+        
+        # Execute queries in batches of 100
+        if len(queries) >= 100:
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            db.execute(text("; ".join(queries)))
+            db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+            db.commit()
+            queries = []
+            
+        offset += batch_size
+    
+    # Execute remaining queries
+    if queries:
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        db.execute(text("; ".join(queries)))
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        db.commit()
+
+
 @router.put("/core/config", responses={403: responses._403})
 def modify_core_config(
-    payload: dict, admin: Admin = Depends(Admin.check_sudo_admin)
+    payload: dict, admin: Admin = Depends(Admin.check_sudo_admin), db: Session = Depends(get_db)
 ) -> dict:
     """Modify the core configuration and restart the core."""
+
+    # Process inbound associations
+    process_inbounds_associations(db, payload)
+    
     try:
         config = XRayConfig(payload, api_port=xray.config.api_port)
     except ValueError as err:
