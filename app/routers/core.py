@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from app import xray
-from app.db import Session, get_db
+from app.db import Session, get_db, crud
 from app.models.admin import Admin
 from app.models.core import CoreStats
 from app.utils import responses
@@ -16,6 +16,7 @@ from config import XRAY_JSON
 from sqlalchemy import text
 from app.db.models import ProxyInbound, User, Proxy, ProxyTypes
 from sqlalchemy.orm import joinedload
+from app.db.crud import get_node_by_id
 
 router = APIRouter(tags=["Core"], prefix="/api", responses={401: responses._401})
 
@@ -184,6 +185,58 @@ def execute_queries(db, delete_queries, replace_queries):
     db.commit()
 
 
+def get_affected_nodes(current_config, new_config):
+    """
+    Определяет, какие ноды затронуты изменениями конфигурации.
+    
+    Args:
+        current_config (dict): Текущая конфигурация
+        new_config (dict): Новая конфигурация
+        
+    Returns:
+        set: Набор имён нод, которые затронуты изменениями
+    """
+    affected_nodes = set()
+    
+    if not (current_config and new_config and 
+            'inbounds' in current_config and 'inbounds' in new_config):
+        return affected_nodes
+    
+    current_inbounds_by_node = {}
+    for inbound in current_config['inbounds']:
+        if 'tag' in inbound:
+            node_name = inbound['tag'].split('_')[0] if '_' in inbound['tag'] else None
+            if node_name:
+                current_inbounds_by_node.setdefault(node_name, []).append(inbound['tag'])
+    
+    new_inbounds_by_node = {}
+    for inbound in new_config['inbounds']:
+        if 'tag' in inbound:
+            node_name = inbound['tag'].split('_')[0] if '_' in inbound['tag'] else None
+            if node_name:
+                new_inbounds_by_node.setdefault(node_name, []).append(inbound['tag'])
+    
+    # Определяем, какие ноды изменились
+    for node_name in set(list(current_inbounds_by_node.keys()) + list(new_inbounds_by_node.keys())):
+        current_tags = set(current_inbounds_by_node.get(node_name, []))
+        new_tags = set(new_inbounds_by_node.get(node_name, []))
+        
+        # Если наборы тегов отличаются, нода изменилась
+        if current_tags != new_tags:
+            affected_nodes.add(node_name)
+        else:
+            # Проверяем, изменились ли параметры для тегов этой ноды
+            for tag in current_tags:
+                current_inbound = next((i for i in current_config['inbounds'] if i.get('tag') == tag), None)
+                new_inbound = next((i for i in new_config['inbounds'] if i.get('tag') == tag), None)
+                
+                if current_inbound != new_inbound:
+                    affected_nodes.add(node_name)
+                    break
+    
+    return affected_nodes
+
+
 @router.put("/core/config", responses={403: responses._403})
 def modify_core_config(
     payload: dict, admin: Admin = Depends(Admin.check_sudo_admin), db: Session = Depends(get_db)
@@ -198,15 +251,40 @@ def modify_core_config(
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
 
+    # Читаем текущую конфигурацию для сравнения
+    current_config = {}
+    try:
+        with open(XRAY_JSON, "r") as f:
+            current_config = commentjson.loads(f.read())
+    except (IOError, json.JSONDecodeError):
+        # Если не можем прочитать текущую конфигурацию, будем перезапускать все ноды
+        pass
+
+    # Находим ноды, которые изменились
+    affected_nodes = get_affected_nodes(current_config, payload)
+
     xray.config = config
     with open(XRAY_JSON, "w") as f:
         f.write(json.dumps(payload, indent=4))
 
     startup_config = xray.config.include_db_users()
     xray.core.restart(startup_config)
-    # for node_id, node in list(xray.nodes.items()):
-    #     if node.connected:
-    #         xray.operations.restart_node(node_id, startup_config)
+    
+    # Перезапускаем только те ноды, которые изменились, или все, если не удалось определить изменения
+    if affected_nodes:
+        # Получаем все ноды из базы данных одним запросом
+        dbnodes = {node.id: node for node in crud.get_nodes(db)}
+        
+        for node_id, node in list(xray.nodes.items()):
+            if node.connected and node_id in dbnodes:
+                dbnode = dbnodes[node_id]
+                if dbnode.name in affected_nodes:
+                    xray.operations.restart_node(node_id, startup_config)
+    else:
+        # Если не удалось определить изменения, перезапускаем все ноды
+        for node_id, node in list(xray.nodes.items()):
+            if node.connected:
+                xray.operations.restart_node(node_id, startup_config)
 
     xray.hosts.update()
 
