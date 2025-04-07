@@ -142,7 +142,7 @@ def process_inbounds_associations(db: Session, payload: dict):
                 
             proxy_id = user.proxies[0].id
             for inbound_tag in all_inbounds:
-                if user.username in inbound_tag:
+                if user.username in inbound_tag and inbound_tag in payload_inbounds:
                     # Delete association if username is in inbound tag
                     delete_queries.append(
                         f"DELETE FROM exclude_inbounds_association WHERE proxy_id = {proxy_id} AND inbound_tag = '{inbound_tag}'"
@@ -172,7 +172,8 @@ def execute_queries(db, delete_queries, replace_queries):
     
     # Execute delete queries if any
     if delete_queries:
-        db.execute(text("; ".join(delete_queries)))
+        for query in delete_queries:
+            db.execute(text(query))
     
     # Execute replace queries in a single batch
     if replace_queries:
