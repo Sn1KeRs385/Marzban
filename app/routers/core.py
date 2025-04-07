@@ -280,11 +280,6 @@ def modify_core_config(
                 dbnode = dbnodes[node_id]
                 if dbnode.name in affected_nodes:
                     xray.operations.restart_node(node_id, startup_config)
-    else:
-        # Если не удалось определить изменения, перезапускаем все ноды
-        for node_id, node in list(xray.nodes.items()):
-            if node.connected:
-                xray.operations.restart_node(node_id, startup_config)
 
     xray.hosts.update()
 
