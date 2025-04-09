@@ -121,6 +121,7 @@ def process_inbounds_associations(db: Session, payload: dict):
     # Process users in batches of 100
     batch_size = 100
     offset = 0
+    replace_queries = []
     
     # Начинаем транзакцию и отключаем проверку внешних ключей
     db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
@@ -150,10 +151,16 @@ def process_inbounds_associations(db: Session, payload: dict):
                 # Добавляем ассоциацию только если имя пользователя не содержится в inbound_tag
                 # или inbound_tag отсутствует в payload_inbounds
                 if not (user.username in inbound_tag and inbound_tag in payload_inbounds):
-                    # Выполняем запрос прямо здесь
-                    db.execute(text(f"INSERT INTO exclude_inbounds_association VALUES ({proxy_id}, '{inbound_tag}')"))
+                    replace_queries.append(
+                        (proxy_id, inbound_tag)
+                    )
         
         offset += batch_size
+    
+    # Добавляем все накопленные ассоциации одним запросом
+    if replace_queries:
+        values = ", ".join([f"({proxy_id}, '{inbound_tag}')" for proxy_id, inbound_tag in replace_queries])
+        db.execute(text(f"INSERT INTO exclude_inbounds_association VALUES {values}"))
     
     # Включаем проверку внешних ключей и завершаем транзакцию
     db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
