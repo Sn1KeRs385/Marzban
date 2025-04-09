@@ -121,8 +121,12 @@ def process_inbounds_associations(db: Session, payload: dict):
     # Process users in batches of 100
     batch_size = 100
     offset = 0
-    delete_queries = []
-    replace_queries = []
+    
+    # Начинаем транзакцию и отключаем проверку внешних ключей
+    db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    
+    # Удаляем все записи в exclude_inbounds_association
+    db.execute(text("DELETE FROM exclude_inbounds_association"))
     
     while True:
         users = (
@@ -143,44 +147,15 @@ def process_inbounds_associations(db: Session, payload: dict):
                 
             proxy_id = user.proxies[0].id
             for inbound_tag in all_inbounds:
-                if user.username in inbound_tag and inbound_tag in payload_inbounds:
-                    # Delete association if username is in inbound tag
-                    delete_queries.append(
-                        f"DELETE FROM exclude_inbounds_association WHERE proxy_id = {proxy_id} AND inbound_tag = '{inbound_tag}'"
-                    )
-                else:
-                    # Add association if username is not in inbound tag
-                    replace_queries.append(
-                        (proxy_id, inbound_tag)
-                    )
+                # Добавляем ассоциацию только если имя пользователя не содержится в inbound_tag
+                # или inbound_tag отсутствует в payload_inbounds
+                if not (user.username in inbound_tag and inbound_tag in payload_inbounds):
+                    # Выполняем запрос прямо здесь
+                    db.execute(text(f"INSERT INTO exclude_inbounds_association VALUES ({proxy_id}, '{inbound_tag}')"))
         
-        # Execute queries in batches of 100
-        if len(delete_queries) + len(replace_queries) >= 100:
-            execute_queries(db, delete_queries, replace_queries)
-            delete_queries = []
-            replace_queries = []
-            
         offset += batch_size
     
-    # Execute remaining queries
-    if delete_queries or replace_queries:
-        execute_queries(db, delete_queries, replace_queries)
-
-
-def execute_queries(db, delete_queries, replace_queries):
-    """Execute batch of queries with foreign key checks disabled."""
-    db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-    
-    # Execute delete queries if any
-    if delete_queries:
-        for query in delete_queries:
-            db.execute(text(query))
-    
-    # Execute replace queries in a single batch
-    if replace_queries:
-        values = ", ".join([f"({proxy_id}, '{inbound_tag}')" for proxy_id, inbound_tag in replace_queries])
-        db.execute(text(f"REPLACE INTO exclude_inbounds_association VALUES {values}"))
-    
+    # Включаем проверку внешних ключей и завершаем транзакцию
     db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
     db.commit()
 
